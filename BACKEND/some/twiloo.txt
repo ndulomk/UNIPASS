@@ -1,0 +1,122 @@
+const express = require("express");
+const bodyParser = require("body-parser");
+const dotenv = require("dotenv");
+const twilio = require("twilio");
+
+dotenv.config();
+
+const app = express();
+app.use(bodyParser.json());
+
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+app.post("/send-code", (req, res) => {
+  const { phoneNumber, code } = req.body;
+
+  client.messages
+    .create({
+      body: `Your confirmation code is: ${code}`,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: phoneNumber,
+    })
+    .then((message) => {
+      res.status(200).send({ success: true, message: "Code sent successfully!" });
+    })
+    .catch((error) => {
+      console.error(error);
+      res.status(500).send({ success: false, message: "Failed to send code." });
+    });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+
+
+
+
+sendcode 
+
+
+
+
+import React, { useState } from "react";
+import axios from "axios";
+
+const SendCode = () => {
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [code, setCode] = useState("");
+  const [message, setMessage] = useState("");
+
+  const generateCode = () => {
+    return Math.floor(100000 + Math.random() * 900000); // Generate a 6-digit random code
+  };
+
+  const handleSendCode = async () => {
+    const confirmationCode = generateCode();
+    setCode(confirmationCode);
+
+    try {
+      const response = await axios.post("http://localhost:3000/send-code", {
+        phoneNumber,
+        code: confirmationCode,
+      });
+
+      if (response.data.success) {
+        setMessage("Code sent successfully!");
+      } else {
+        setMessage("Failed to send the code.");
+      }
+    } catch (error) {
+      console.error(error);
+      setMessage("An error occurred while sending the code.");
+    }
+  };
+
+  return (
+    <div style={{ padding: "20px", maxWidth: "400px", margin: "auto" }}>
+      <h2>Send Confirmation Code</h2>
+      <input
+        type="text"
+        placeholder="Enter phone number"
+        value={phoneNumber}
+        onChange={(e) => setPhoneNumber(e.target.value)}
+        style={{ width: "100%", padding: "10px", marginBottom: "10px" }}
+      />
+      <button
+        onClick={handleSendCode}
+        style={{
+          padding: "10px",
+          width: "100%",
+          backgroundColor: "#4CAF50",
+          color: "white",
+          border: "none",
+          cursor: "pointer",
+        }}
+      >
+        Send Code
+      </button>
+      {message && <p style={{ marginTop: "10px" }}>{message}</p>}
+    </div>
+  );
+};
+
+export default SendCode;
+
+
+
+app
+
+
+import React from "react";
+import SendCode from "./SendCode";
+
+const App = () => {
+  return (
+    <div>
+      <SendCode />
+    </div>
+  );
+};
+
+export default App;
+

@@ -1,0 +1,174 @@
+const sqlite3 = require("sqlite3").verbose();
+const db = new sqlite3.Database("./users.db");
+
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE,
+      password TEXT
+    )
+  `);
+});
+
+module.exports = db;
+
+
+
+const express = require("express");
+const bodyParser = require("body-parser");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const dotenv = require("dotenv");
+const db = require("./database");
+
+dotenv.config();
+
+const app = express();
+app.use(bodyParser.json());
+
+const SECRET_KEY = process.env.SECRET_KEY || "your_secret_key";
+
+// Sign Up
+app.post("/signup", (req, res) => {
+  const { username, password } = req.body;
+
+  // Hash the password
+  const hashedPassword = bcrypt.hashSync(password, 10);
+
+  const query = "INSERT INTO users (username, password) VALUES (?, ?)";
+  db.run(query, [username, hashedPassword], (err) => {
+    if (err) {
+      if (err.code === "SQLITE_CONSTRAINT") {
+        return res.status(400).json({ error: "Username already exists" });
+      }
+      return res.status(500).json({ error: "Failed to register user" });
+    }
+    res.status(201).json({ message: "User registered successfully" });
+  });
+});
+
+// Login
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+
+  const query = "SELECT * FROM users WHERE username = ?";
+  db.get(query, [username], (err, user) => {
+    if (err) return res.status(500).json({ error: "Database error" });
+    if (!user) return res.status(400).json({ error: "Invalid username or password" });
+
+    const isPasswordValid = bcrypt.compareSync(password, user.password);
+    if (!isPasswordValid) {
+      return res.status(400).json({ error: "Invalid username or password" });
+    }
+
+    const token = jwt.sign({ id: user.id, username: user.username }, SECRET_KEY, { expiresIn: "1h" });
+    res.status(200).json({ message: "Login successful", token });
+  });
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
+
+
+
+signup
+
+
+
+import React, { useState } from "react";
+import axios from "axios";
+
+const Signup = () => {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+
+  const handleSignup = async (e) => {
+    e.preventDefault();
+
+    try {
+      const response = await axios.post("http://localhost:3001/signup", { username, password });
+      setMessage(response.data.message);
+    } catch (error) {
+      setMessage(error.response?.data?.error || "An error occurred");
+    }
+  };
+
+  return (
+    <div>
+      <h2>Sign Up</h2>
+      <form onSubmit={handleSignup}>
+        <input
+          type="text"
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <button type="submit">Sign Up</button>
+      </form>
+      {message && <p>{message}</p>}
+    </div>
+  );
+};
+
+export default Signup;
+
+
+
+login
+
+
+
+import React, { useState } from "react";
+import axios from "axios";
+
+const Login = () => {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+
+    try {
+      const response = await axios.post("http://localhost:3001/login", { username, password });
+      localStorage.setItem("token", response.data.token);
+      setMessage("Login successful");
+    } catch (error) {
+      setMessage(error.response?.data?.error || "An error occurred");
+    }
+  };
+
+  return (
+    <div>
+      <h2>Login</h2>
+      <form onSubmit={handleLogin}>
+        <input
+          type="text"
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <button type="submit">Login</button>
+      </form>
+      {message && <p>{message}</p>}
+    </div>
+  );
+};
+
+export default Login;

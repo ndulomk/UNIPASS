@@ -1,0 +1,188 @@
+const sqlite3 = require("sqlite3").verbose();
+const db = new sqlite3.Database("./photos.db");
+
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT,
+      filepath TEXT
+    )
+  `);
+});
+
+module.exports = db;
+
+
+
+
+const express = require("express");
+const bodyParser = require("body-parser");
+const multer = require("multer");
+const path = require("path");
+const dotenv = require("dotenv");
+const db = require("./database");
+
+dotenv.config();
+
+const app = express();
+app.use(bodyParser.json());
+app.use("/uploads", express.static(path.join(__dirname, "uploads"))); // Servir imagens
+
+// Configurar Multer para salvar imagens na pasta 'uploads'
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  },
+});
+const upload = multer({ storage });
+
+// Rota para upload de fotos
+app.post("/upload", upload.single("photo"), (req, res) => {
+  const { title } = req.body;
+  const filepath = req.file.path;
+
+  const query = "INSERT INTO photos (title, filepath) VALUES (?, ?)";
+  db.run(query, [title, filepath], (err) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to save photo" });
+    }
+    res.status(201).json({ message: "Photo uploaded successfully" });
+  });
+});
+
+// Rota para buscar fotos
+app.get("/photos", (req, res) => {
+  db.all("SELECT * FROM photos", [], (err, rows) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to fetch photos" });
+    }
+    res.status(200).json(rows);
+  });
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
+
+
+
+
+import React, { useState } from "react";
+import axios from "axios";
+
+const UploadPhoto = () => {
+  const [title, setTitle] = useState("");
+  const [photo, setPhoto] = useState(null);
+  const [message, setMessage] = useState("");
+
+  const handleUpload = async (e) => {
+    e.preventDefault();
+
+    const formData = new FormData();
+    formData.append("title", title);
+    formData.append("photo", photo);
+
+    try {
+      const response = await axios.post("http://localhost:3001/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setMessage(response.data.message);
+    } catch (error) {
+      setMessage("Failed to upload photo");
+    }
+  };
+
+  return (
+    <div>
+      <h2>Upload Photo</h2>
+      <form onSubmit={handleUpload}>
+        <input
+          type="text"
+          placeholder="Photo Title"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          required
+        />
+        <input
+          type="file"
+          accept="image/*"
+          onChange={(e) => setPhoto(e.target.files[0])}
+          required
+        />
+        <button type="submit">Upload</button>
+      </form>
+      {message && <p>{message}</p>}
+    </div>
+  );
+};
+
+export default UploadPhoto;
+
+
+
+
+
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+
+const PhotoGallery = () => {
+  const [photos, setPhotos] = useState([]);
+
+  useEffect(() => {
+    const fetchPhotos = async () => {
+      try {
+        const response = await axios.get("http://localhost:3001/photos");
+        setPhotos(response.data);
+      } catch (error) {
+        console.error("Failed to fetch photos", error);
+      }
+    };
+
+    fetchPhotos();
+  }, []);
+
+  return (
+    <div>
+      <h2>Photo Gallery</h2>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
+        {photos.map((photo) => (
+          <div key={photo.id} style={{ border: "1px solid #ccc", padding: "10px" }}>
+            <h4>{photo.title}</h4>
+            <img
+              src={`http://localhost:3001/${photo.filepath}`}
+              alt={photo.title}
+              style={{ width: "100px", height: "100px", objectFit: "cover" }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default PhotoGallery;
+
+
+
+
+import React from "react";
+import UploadPhoto from "./UploadPhoto";
+import PhotoGallery from "./PhotoGallery";
+
+const App = () => {
+  return (
+    <div>
+      <UploadPhoto />
+      <PhotoGallery />
+    </div>
+  );
+};
+
+export default App;
