@@ -1,0 +1,14 @@
+'use client';
+
+import TakeExam from '@/components/exams/TakeExam';
+import StudentLayout from '@/components/layouts/StudentLayout';
+
+const StudentTakeExamPage = () => {
+  return (
+    <StudentLayout>
+      <TakeExam />
+    </StudentLayout>
+  );
+};
+
+export default StudentTakeExamPage;
