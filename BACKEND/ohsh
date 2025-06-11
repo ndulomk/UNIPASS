@@ -1,0 +1,1063 @@
+// server.js
+import dotenv from 'dotenv';
+import { open } from 'sqlite';
+import express from 'express';
+import sqlite3 from 'sqlite3';
+import helmet from 'helmet';
+import morgan from 'morgan';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import fs from 'fs';
+
+dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Configuração da App
+const app = express();
+const PORT = process.env.PORT || 3001;
+const API_PREFIX = process.env.API_PREFIX || '/api/v1';
+const SECRET_KEY = process.env.SECRET_KEY || 'your-fallback-secret-key';
+const ACCESS_TOKEN_EXPIRE_MINUTES = parseInt(process.env.ACCESS_TOKEN_EXPIRE_MINUTES || '30', 10);
+
+// Middlewares
+app.use(helmet());
+app.use(morgan('dev'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cors({
+  origin: 'http://localhost:3000',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+const DOC_UPLOAD_DIR = path.join(__dirname, 'static', 'registrations');
+if (!fs.existsSync(DOC_UPLOAD_DIR)) {
+  fs.mkdirSync(DOC_UPLOAD_DIR, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const enrollmentId = req.params.enrollmentId || 'temp';
+    const uploadPath = path.join(DOC_UPLOAD_DIR, enrollmentId);
+    fs.mkdirSync(uploadPath, { recursive: true });
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `${req.body.type || 'doc'}-${Date.now()}${ext}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/png', 'application/pdf'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Apenas JPEG, PNG ou PDF são permitidos.'));
+    }
+  },
+});
+
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'unipass.sqlite3');
+let db = null;
+
+async function openDb() {
+  if (db) return db;
+  db = await open({
+    filename: dbPath,
+    driver: sqlite3.Database,
+  });
+  return db;
+}
+
+async function dbRun(sql, params = []) {
+  const instance = await openDb();
+  return instance.run(sql, params);
+}
+
+async function dbGet(sql, params = []) {
+  const instance = await openDb();
+  return instance.get(sql, params);
+}
+
+async function dbAll(sql, params = []) {
+  const instance = await openDb();
+  return instance.all(sql, params);
+}
+
+async function closeDb() {
+  if (db) {
+    await db.close();
+    db = null;
+    console.log('Conexão com a base de dados SQLite fechada.');
+  }
+}
+
+async function initializeDb() {
+  try {
+    console.log('Starting database initialization...');
+    await dbRun('BEGIN TRANSACTION');
+    await dbRun('PRAGMA foreign_keys = ON');
+
+    const tables = [
+      // 1. Cursos
+      `CREATE TABLE IF NOT EXISTS courses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        duration_months INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+      )`,
+
+      // 2. Períodos letivos
+      `CREATE TABLE IF NOT EXISTS academic_periods (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        start_date DATE NOT NULL,
+        end_date DATE NOT NULL,
+        is_active BOOLEAN DEFAULT FALSE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        UNIQUE(name, start_date)
+      )`,
+
+      // 3. Usuários
+      `CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        first_name TEXT NOT NULL,
+        last_name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        hashed_password TEXT,
+        role TEXT NOT NULL CHECK(role IN ('admin', 'staff', 'student', 'candidate')),
+        phone TEXT,
+        course_id INTEGER,
+        status TEXT DEFAULT 'active' CHECK(status IN ('active', 'inactive', 'suspended')),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE SET NULL
+      )`,
+
+      // 4. Disciplinas
+      `CREATE TABLE IF NOT EXISTS disciplines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        code TEXT,
+        credits INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+      )`,
+
+      // 5. Matrículas
+      `CREATE TABLE IF NOT EXISTS enrollments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        course_id INTEGER NOT NULL,
+        academic_period_id INTEGER NOT NULL,
+        code TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'completed', 'canceled')),
+        enrolled_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+        FOREIGN KEY (academic_period_id) REFERENCES academic_periods(id) ON DELETE CASCADE
+      )`,
+
+      // 6. Documentos de matrícula
+      `CREATE TABLE IF NOT EXISTS enrollment_docs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        enrollment_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER,
+        file_type TEXT,
+        validation_status TEXT CHECK(validation_status IN ('pending', 'approved', 'rejected')),
+        validation_comments TEXT,
+        validated_at DATETIME,
+        uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (enrollment_id) REFERENCES enrollments(id) ON DELETE CASCADE
+      )`,
+
+      // 7. Pagamentos
+      `CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        enrollment_id INTEGER NOT NULL,
+        amount REAL NOT NULL CHECK(amount > 0),
+        type TEXT NOT NULL CHECK(type IN ('tuition', 'registration', 'exam_fee', 'other')),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'paid', 'failed', 'refunded')),
+        payment_date DATETIME,
+        reference TEXT UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (enrollment_id) REFERENCES enrollments(id) ON DELETE CASCADE
+      )`,
+
+      // 8. Exames
+      `CREATE TABLE IF NOT EXISTS exams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        discipline_id INTEGER NOT NULL,
+        academic_period_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        exam_date DATETIME NOT NULL,
+        duration_minutes INTEGER CHECK(duration_minutes > 0),
+        type TEXT NOT NULL CHECK(type IN ('normal', 'recuperation', 'special')),
+        max_score INTEGER CHECK(max_score > 0),
+        second_call_eligible BOOLEAN DEFAULT FALSE,
+        second_call_date DATETIME,
+        publication_date DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+        FOREIGN KEY (discipline_id) REFERENCES disciplines(id) ON DELETE CASCADE,
+        FOREIGN KEY (academic_period_id) REFERENCES academic_periods(id) ON DELETE CASCADE
+      )`,
+
+      // 9. Questões
+      `CREATE TABLE IF NOT EXISTS questions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        exam_id INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('multiple_choice', 'true_false', 'essay')),
+        options TEXT,
+        correct_answer TEXT,
+        score INTEGER NOT NULL CHECK(score > 0),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE
+      )`,
+
+      // 10. Notas
+      `CREATE TABLE IF NOT EXISTS grades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        enrollment_id INTEGER NOT NULL,
+        discipline_id INTEGER NOT NULL,
+        academic_period_id INTEGER NOT NULL,
+        exam_id INTEGER,
+        score REAL NOT NULL CHECK(score >= 0),
+        max_score REAL NOT NULL CHECK(max_score > 0),
+        evaluation_type TEXT NOT NULL CHECK(evaluation_type IN ('midterm', 'final', 'makeup', 'continuous')),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (enrollment_id) REFERENCES enrollments(id) ON DELETE CASCADE,
+        FOREIGN KEY (discipline_id) REFERENCES disciplines(id) ON DELETE CASCADE,
+        FOREIGN KEY (academic_period_id) REFERENCES academic_periods(id) ON DELETE CASCADE,
+        FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE SET NULL
+      )`,
+
+      // 11. Respostas dos alunos
+      `CREATE TABLE IF NOT EXISTS student_answers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        enrollment_id INTEGER NOT NULL,
+        exam_id INTEGER NOT NULL,
+        question_id INTEGER NOT NULL,
+        answer TEXT,
+        is_correct BOOLEAN,
+        score_awarded REAL DEFAULT 0 CHECK(score_awarded >= 0),
+        answered_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (enrollment_id) REFERENCES enrollments(id) ON DELETE CASCADE,
+        FOREIGN KEY (exam_id) REFERENCES exams(id) ON DELETE CASCADE,
+        FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE,
+        UNIQUE (enrollment_id, exam_id, question_id)
+      )`,
+
+      // 12. Logs de auditoria
+      `CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        action TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER,
+        details TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+      )`,
+
+      // 13. Matrizes de conteúdo
+      `CREATE TABLE IF NOT EXISTS content_matrices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        discipline_id INTEGER NOT NULL,
+        theme TEXT NOT NULL,
+        competencies TEXT NOT NULL,
+        skills TEXT NOT NULL,
+        syllabus TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        FOREIGN KEY (discipline_id) REFERENCES disciplines(id) ON DELETE NO ACTION
+      )`,
+    ];
+
+    for (const [index, tableQuery] of tables.entries()) {
+      try {
+        await dbRun(tableQuery);
+        console.log(`Table ${index + 1} created successfully.`);
+      } catch (err) {
+        console.error(`Error creating table ${index + 1}:`, err.message);
+        throw err;
+      }
+    }
+
+    const indexes = [
+      'CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)',
+      'CREATE INDEX IF NOT EXISTS idx_enrollments_code ON enrollments(code)',
+      'CREATE INDEX IF NOT EXISTS idx_enrollments_user_id ON enrollments(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_enrollment_docs_enrollment_id ON enrollment_docs(enrollment_id)',
+      'CREATE INDEX IF NOT EXISTS idx_exams_date ON exams(exam_date)',
+      'CREATE INDEX IF NOT EXISTS idx_grades_enrollment_id ON grades(enrollment_id)',
+      'CREATE INDEX IF NOT EXISTS idx_student_answers_exam_id ON student_answers(exam_id)',
+      'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_payments_enrollment_id ON payments(enrollment_id)',
+    ];
+
+    for (const [index, indexQuery] of indexes.entries()) {
+      try {
+        await dbRun(indexQuery);
+        console.log(`Index ${index + 1} created successfully.`);
+      } catch (err) {
+        console.error(`Error creating index ${index + 1}:`, err.message);
+        throw err;
+      }
+    }
+
+    await dbRun('COMMIT');
+    console.log('Database initialized successfully.');
+  } catch (error) {
+    await dbRun('ROLLBACK').catch((err) => console.error('Error during rollback:', err.message));
+    console.error('Error during database initialization:', error.message);
+    throw new Error(`Initialization failed: ${error.message}`);
+  }
+}
+
+async function insertInitialData() {
+  try {
+    await dbRun(
+      `INSERT OR IGNORE INTO users (email, first_name, last_name, hashed_password, role, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        'admin@test.com',
+        'António',
+        'dos Santos',
+        await bcrypt.hash('admin', 10),
+        'admin',
+        'active',
+      ]
+    );
+
+    await dbRun(
+      `INSERT OR IGNORE INTO academic_periods (name, start_date, end_date, is_active)
+       VALUES (?, ?, ?, ?)`,
+      ['2025/1', '2025-01-01', '2025-06-30', 1]
+    );
+
+    const courses = [
+      { id: 1, name: 'Engenharia Informática', description: 'Curso de tecnologia e sistemas', duration_months: 48 },
+      { id: 2, name: 'Medicina', description: 'Formação em saúde e cuidados médicos', duration_months: 72 },
+      { id: 3, name: 'Direito', description: 'Estudo das leis e justiça', duration_months: 48 },
+      { id: 4, name: 'Psicologia', description: 'Análise do comportamento humano', duration_months: 48 },
+    ];
+
+    for (const course of courses) {
+      await dbRun(
+        `INSERT OR IGNORE INTO courses (id, name, description, duration_months) VALUES (?, ?, ?, ?)`,
+        [course.id, course.name, course.description, course.duration_months]
+      );
+    }
+
+    const disciplines = [
+      { course_id: 1, name: 'Programação I', code: 'INF001' },
+      { course_id: 1, name: 'Base de Dados', code: 'INF002' },
+      { course_id: 2, name: 'Anatomia Humana', code: 'MED001' },
+      { course_id: 3, name: 'Direito Civil', code: 'DIR001' },
+    ];
+
+    for (const disc of disciplines) {
+      await dbRun(`INSERT OR IGNORE INTO disciplines (course_id, name, code) VALUES (?, ?, ?)`, [
+        disc.course_id,
+        disc.name,
+        disc.code,
+      ]);
+    }
+
+    console.log('Initial data inserted successfully.');
+  } catch (error) {
+    console.error('Error inserting initial data:', error.message);
+    throw error;
+  }
+}
+
+async function populateMoreMockData(numUsers = 50, numEnrollments = 150, numExams = 20) {
+  try {
+    const firstNames = [
+      'João', 'Maria', 'José', 'Ana', 'Manuel', 'Isabel', 'António', 'Sofia', 'Domingos', 'Lúcia',
+      'Pedro', 'Teresa', 'Francisco', 'Clara', 'Miguel', 'Rosa', 'Afonso', 'Esperança', 'Samuel', 'Beatriz',
+    ];
+    const lastNames = [
+      'dos Santos', 'Silva', 'Mendes', 'Ferreira', 'Almeida', 'Gomes', 'Lopes', 'Nhantumbo', 'Cumbane', 'Machel',
+      'Pereira', 'Costa', 'Fernandes', 'Rodrigues', 'Martins', 'Chissano', 'Mondlane', 'Dhlakama', 'Nkomo', 'Tchissola',
+    ];
+
+    const courses = await dbAll('SELECT id FROM courses');
+    const academicPeriod = await dbGet('SELECT id FROM academic_periods WHERE is_active = 1');
+    if (courses.length === 0 || !academicPeriod) {
+      console.log('Courses or active academic period not found.');
+      return;
+    }
+
+    for (let i = 0; i < numUsers; i++) {
+      const firstName = firstNames[i % firstNames.length];
+      const lastName = lastNames[i % lastNames.length];
+      const email = `${firstName.toLowerCase()}.${lastName.toLowerCase().replace(' ', '')}${i}@test.com`;
+      const role = i % 5 === 0 ? 'candidate' : 'student';
+      const phone = `+2449${Math.floor(10000000 + Math.random() * 90000000)}`;
+
+      await dbRun(
+        `INSERT OR IGNORE INTO users (first_name, last_name, email, role, phone, status)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [firstName, lastName, email, role, phone, 'active']
+      );
+    }
+
+    const allUsers = await dbAll("SELECT id, role FROM users WHERE role IN ('candidate', 'student')");
+
+    for (let i = 0; i < numEnrollments; i++) {
+      const user = allUsers[i % allUsers.length];
+      const course = courses[i % courses.length];
+      const year = new Date().getFullYear();
+      const randomDaysAgo = Math.floor(Math.random() * 90);
+      const enrollmentDate = new Date();
+      enrollmentDate.setDate(enrollmentDate.getDate() - randomDaysAgo);
+
+      if (isNaN(enrollmentDate.getTime())) {
+        console.error(`Invalid enrollment date for enrollment ${i}`);
+        continue;
+      }
+
+      const code = `${course.id}-${year}-${String(i + 1).padStart(4, '0')}`;
+      const statusOptions = ['pending', 'approved', 'rejected', 'completed', 'canceled'];
+      const status = statusOptions[Math.floor(Math.random() * statusOptions.length)];
+
+      await dbRun(
+        `INSERT OR IGNORE INTO enrollments (user_id, course_id, academic_period_id, code, status, enrolled_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [user.id, course.id, academicPeriod.id, code, status, enrollmentDate.toISOString()]
+      );
+    }
+
+    const disciplines = await dbAll('SELECT id, course_id FROM disciplines');
+    if (disciplines.length > 0) {
+      for (let i = 0; i < numExams; i++) {
+        const discipline = disciplines[i % disciplines.length];
+        const examDate = new Date();
+        const randomDaysOffset = Math.floor(Math.random() * 60) - 30;
+        examDate.setDate(examDate.getDate() + randomDaysOffset);
+
+        if (isNaN(examDate.getTime())) {
+          console.error(`Invalid exam date for exam ${i}`);
+          continue;
+        }
+
+        const examTypes = ['normal', 'recuperation', 'special'];
+
+        const examResult = await dbRun(
+          `INSERT OR IGNORE INTO exams (course_id, discipline_id, academic_period_id, name, exam_date, duration_minutes, type, max_score)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            discipline.course_id,
+            discipline.id,
+            academicPeriod.id,
+            `Exame de ${discipline.id} #${i + 1}`,
+            examDate.toISOString(),
+            [60, 90, 120][Math.floor(Math.random() * 3)],
+            examTypes[Math.floor(Math.random() * examTypes.length)],
+            20,
+          ]
+        );
+
+        if (examResult.lastID) {
+          const numQuestions = Math.floor(Math.random() * 5) + 3;
+          for (let j = 0; j < numQuestions; j++) {
+            await dbRun(
+              `INSERT OR IGNORE INTO questions (exam_id, text, type, correct_answer, score)
+               VALUES (?, ?, ?, ?, ?)`,
+              [
+                examResult.lastID,
+                `Questão ${j + 1} do exame ${i + 1}`,
+                'multiple_choice',
+                `Resposta ${j + 1}`,
+                Math.floor(Math.random() * 5) + 1,
+              ]
+            );
+          }
+        }
+      }
+    }
+
+    const allEnrollments = await dbAll('SELECT id FROM enrollments');
+    const allExams = await dbAll("SELECT id, exam_date, discipline_id FROM exams WHERE DATE(exam_date) < DATE('now')");
+
+    if (allEnrollments.length > 0 && allExams.length > 0) {
+      for (let i = 0; i < Math.min(allEnrollments.length * 0.5, 100); i++) {
+        const enrollment = allEnrollments[i % allEnrollments.length];
+        const exam = allExams[i % allExams.length];
+        const score = Math.floor(Math.random() * 21);
+        const evaluationType = ['midterm', 'final', 'makeup'][Math.floor(Math.random() * 3)];
+
+        const examDate = new Date(exam.exam_date);
+        if (isNaN(examDate.getTime())) {
+          console.error(`Invalid exam date: ${exam.exam_date}`);
+          continue;
+        }
+
+        await dbRun(
+          `INSERT OR IGNORE INTO grades (enrollment_id, discipline_id, academic_period_id, exam_id, score, max_score, evaluation_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [enrollment.id, exam.discipline_id, academicPeriod.id, exam.id, score, 20, evaluationType]
+        );
+      }
+    }
+
+    console.log(`Mock data population completed: ${numUsers} users, ${numEnrollments} enrollments, ${numExams} exams.`);
+  } catch (error) {
+    console.error('Error populating mock data:', error.message);
+    throw error;
+  }
+}
+
+async function setupAndSeedDatabase() {
+  try {
+    await openDb();
+    await initializeDb();
+    await insertInitialData();
+
+    const enrollmentsCount = await dbGet('SELECT COUNT(*) as count FROM enrollments');
+    if (enrollmentsCount.count < 50) {
+      await populateMoreMockData();
+    }
+
+    console.log('Database setup and seeded successfully.');
+  } catch (error) {
+    console.error('Error setting up and seeding database:', error.message);
+    throw error;
+  }
+}
+
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Access token required.' });
+
+  jwt.verify(token, SECRET_KEY, (err, user) => {
+    if (err) return res.status(403).json({ message: 'Invalid token.' });
+    req.user = user;
+    next();
+  });
+}
+
+// Auth Routes
+app.post(`${API_PREFIX}/auth/token`, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email e senha são obrigatórios.' });
+    }
+
+    const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
+    if (!user || !user.hashed_password) {
+      return res.status(401).json({ message: 'Credenciais inválidas.' });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.hashed_password);
+    if (!isValidPassword) {
+      return res.status(401).json({ message: 'Credenciais inválidas.' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      SECRET_KEY,
+      { expiresIn: `${ACCESS_TOKEN_EXPIRE_MINUTES}m` }
+    );
+
+    res.json({ access_token: token });
+  } catch (error) {
+    res.status(500).json({ message: 'Erro ao autenticar.', error: error.message });
+  }
+});
+
+// User Routes
+app.get(`${API_PREFIX}/users/me`, authenticateToken, async (req, res) => {
+  try {
+    const user = await dbGet(
+      'SELECT id, first_name, last_name, email, role, phone, course_id, status FROM users WHERE id = ?',
+      [req.user.id]
+    );
+    if (!user) return res.status(404).json({ message: 'User not found.' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching user.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/users`, authenticateToken, async (req, res) => {
+  try {
+    const { role } = req.query;
+    const users = await dbAll(
+      `SELECT id, first_name, last_name, email, phone, course_id, status
+       FROM users WHERE role = ?`,
+      [role]
+    );
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching users.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/users/recent`, authenticateToken, async (req, res) => {
+  try {
+    const { role, limit = 5 } = req.query;
+    const users = await dbAll(
+      `SELECT u.id, u.first_name, u.last_name, u.email, u.phone, c.name as course_name, e.status as enrollment_status, e.enrolled_at
+       FROM users u
+       LEFT JOIN enrollments e ON u.id = e.user_id
+       LEFT JOIN courses c ON e.course_id = c.id
+       WHERE u.role = ?
+       ORDER BY u.created_at DESC
+       LIMIT ?`,
+      [role, parseInt(limit)]
+    );
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching recent users.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/users/:id`, authenticateToken, async (req, res) => {
+  try {
+    const user = await dbGet(
+      'SELECT id, first_name, last_name, email, phone, course_id, status FROM users WHERE id = ?',
+      [req.params.id]
+    );
+    if (!user) return res.status(404).json({ message: 'User not found.' });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching user.', error: error.message });
+  }
+});
+
+// Course Routes
+app.get(`${API_PREFIX}/courses`, authenticateToken, async (req, res) => {
+  try {
+    const courses = await dbAll('SELECT id, name, description, duration_months, created_at, updated_at FROM courses');
+    res.json(courses);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching courses.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/courses/:courseId/disciplines`, authenticateToken, async (req, res) => {
+  try {
+    const disciplines = await dbAll(
+      'SELECT id, course_id, name, code, credits, created_at, updated_at FROM disciplines WHERE course_id = ?',
+      [req.params.courseId]
+    );
+    res.json(disciplines);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching disciplines.', error: error.message });
+  }
+});
+
+// Enrollment Routes
+app.get(`${API_PREFIX}/enrollments`, authenticateToken, async (req, res) => {
+  try {
+    const { user_id } = req.query;
+    const enrollments = await dbAll(
+      `SELECT e.*, c.name as course_name, u.first_name, u.last_name, u.email
+       FROM enrollments e
+       JOIN courses c ON e.course_id = c.id
+       JOIN users u ON e.user_id = u.id
+       WHERE e.user_id = ?`,
+      [user_id]
+    );
+    res.json(enrollments);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching enrollments.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/enrollments/:id/details`, authenticateToken, async (req, res) => {
+  try {
+    const enrollment = await dbGet(
+      `SELECT e.*, c.name as course_name, u.id as user_id, u.first_name, u.last_name, u.email
+       FROM enrollments e
+       JOIN courses c ON e.course_id = c.id
+       JOIN users u ON e.user_id = u.id
+       WHERE e.id = ?`,
+      [req.params.id]
+    );
+    if (!enrollment) return res.status(404).json({ message: 'Enrollment not found.' });
+    res.json({
+      id: enrollment.id,
+      user_id: enrollment.user_id,
+      course_id: enrollment.course_id,
+      code: enrollment.code,
+      status: enrollment.status,
+      enrolled_at: enrollment.enrolled_at,
+      updated_at: enrollment.updated_at,
+      user: {
+        id: enrollment.user_id,
+        first_name: enrollment.first_name,
+        last_name: enrollment.last_name,
+        email: enrollment.email,
+      },
+      course: { id: enrollment.course_id, name: enrollment.course_name },
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching enrollment details.', error: error.message });
+  }
+});
+
+// Grades Routes
+app.get(`${API_PREFIX}/grades/student/:enrollmentId`, authenticateToken, async (req, res) => {
+  try {
+    const grades = await dbAll(
+      `SELECT g.*, e.name as exam_name, e.exam_date, c.name as course_name, d.name as discipline_name
+       FROM grades g
+       LEFT JOIN exams e ON g.exam_id = e.id
+       JOIN courses c ON g.discipline_id = d.id AND d.course_id = c.id
+       JOIN disciplines d ON g.discipline_id = d.id
+       WHERE g.enrollment_id = ?`,
+      [req.params.enrollmentId]
+    );
+    res.json(grades);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching student grades.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/grades/student/:enrollmentId/performance`, authenticateToken, async (req, res) => {
+  try {
+    const performance = await dbAll(
+      `SELECT d.name as discipline_name, e.name as exam_name, e.exam_date, g.score, g.max_score, g.evaluation_type
+       FROM grades g
+       LEFT JOIN exams e ON g.exam_id = e.id
+       JOIN disciplines d ON g.discipline_id = d.id
+       WHERE g.enrollment_id = ?`,
+      [req.params.enrollmentId]
+    );
+    res.json(performance);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching student performance.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/grades/admin/all-details`, authenticateToken, async (req, res) => {
+  try {
+    const grades = await dbAll(
+      `SELECT g.*, u.first_name, u.last_name, u.email, e.name as exam_name, e.exam_date, c.name as course_name, d.name as discipline_name
+       FROM grades g
+       JOIN enrollments en ON g.enrollment_id = en.id
+       JOIN users u ON en.user_id = u.id
+       LEFT JOIN exams e ON g.exam_id = e.id
+       JOIN courses c ON en.course_id = c.id
+       JOIN disciplines d ON g.discipline_id = d.id`
+    );
+    res.json(grades);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching all grades.', error: error.message });
+  }
+});
+
+// Exam Routes
+app.post(`${API_PREFIX}/exams`, authenticateToken, async (req, res) => {
+  try {
+    const { name, course_id, discipline_id, academic_period_id, type, exam_date, duration_minutes, max_score, second_call_eligible, second_call_date, publication_date, questions } = req.body;
+
+    if (!['normal', 'recuperation', 'special'].includes(type)) {
+      return res.status(400).json({ message: 'Invalid exam type.' });
+    }
+
+    const result = await dbRun(
+      `INSERT INTO exams (course_id, discipline_id, academic_period_id, name, exam_date, duration_minutes, type, max_score, second_call_eligible, second_call_date, publication_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [course_id, discipline_id, academic_period_id, name, exam_date, duration_minutes, type, max_score, second_call_eligible, second_call_date, publication_date]
+    );
+
+    if (questions && questions.length > 0) {
+      for (const q of questions) {
+        if (!['multiple_choice', 'true_false', 'essay'].includes(q.type)) {
+          return res.status(400).json({ message: 'Invalid question type.' });
+        }
+        await dbRun(
+          `INSERT INTO questions (exam_id, text, type, options, correct_answer, score)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [result.lastID, q.text, q.type, q.options, q.correct_answer, q.score]
+        );
+      }
+    }
+
+    await dbRun(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details)
+       VALUES (?, ?, ?, ?, ?)`,
+      [req.user.id, 'create_exam', 'exam', result.lastID, JSON.stringify({ name, course_id })]
+    );
+
+    res.status(201).json({ id: result.lastID, message: 'Exam created successfully.' });
+  } catch (error) {
+    res.status(500).json({ message: 'Error creating exam.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/exams/upcoming/details`, authenticateToken, async (req, res) => {
+  try {
+    const { limit = 3, course_id } = req.query;
+    let query = `
+      SELECT e.id, e.name, c.name as course_name, d.name as discipline_name, e.exam_date, e.type
+      FROM exams e
+      JOIN courses c ON e.course_id = c.id
+      JOIN disciplines d ON e.discipline_id = d.id
+      WHERE e.exam_date >= datetime('now')
+    `;
+    const params = [];
+
+    if (course_id) {
+      query += ' AND e.course_id = ?';
+      params.push(course_id);
+    }
+
+    query += ' ORDER BY e.exam_date ASC LIMIT ?';
+    params.push(parseInt(limit));
+
+    const exams = await dbAll(query, params);
+    res.json(exams);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching upcoming exams.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/exams/:id`, authenticateToken, async (req, res) => {
+  try {
+    const exam = await dbGet(
+      `SELECT e.*, c.name as course_name, d.name as discipline_name
+       FROM exams e
+       JOIN courses c ON e.course_id = c.id
+       JOIN disciplines d ON e.discipline_id = d.id
+       WHERE e.id = ?`,
+      [req.params.id]
+    );
+    if (!exam) return res.status(404).json({ message: 'Exam not found.' });
+
+    const questions = await dbAll(
+      'SELECT id, text, type, options, correct_answer, score FROM questions WHERE exam_id = ?',
+      [req.params.id]
+    );
+
+    res.json({ ...exam, questions });
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching exam details.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/exams`, authenticateToken, async (req, res) => {
+  try {
+    const { course_id } = req.query;
+    let query = `
+      SELECT e.id, e.name as exam_name, e.exam_date, e.type, c.name as course_name, d.name as discipline_name
+      FROM exams e
+      JOIN courses c ON e.course_id = c.id
+      JOIN disciplines d ON e.discipline_id = d.id
+    `;
+    const params = [];
+
+    if (course_id) {
+      query += ' WHERE e.course_id = ?';
+      params.push(course_id);
+    }
+
+    const exams = await dbAll(query, params);
+    res.json(exams);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching exams.', error: error.message });
+  }
+});
+
+// Enrollment Docs Routes
+app.post(`${API_PREFIX}/enrollment_docs/upload/:enrollmentId`, authenticateToken, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded.' });
+    }
+
+    const enrollment = await dbGet('SELECT id FROM enrollments WHERE id = ?', [req.params.enrollmentId]);
+    if (!enrollment) {
+      return res.status(404).json({ message: 'Enrollment not found.' });
+    }
+
+    const { type } = req.body;
+    if (!type) {
+      return res.status(400).json({ message: 'Document type is required.' });
+    }
+
+    const filePath = path.relative(__dirname, req.file.path).replace(/\\/g, '/');
+
+    const result = await dbRun(
+      `INSERT INTO enrollment_docs (enrollment_id, type, file_path, file_size, file_type, validation_status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [req.params.enrollmentId, type, filePath, req.file.size, req.file.mimetype, 'pending']
+    );
+
+    await dbRun(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details)
+       VALUES (?, ?, ?, ?, ?)`,
+      [req.user.id, 'upload_doc', 'enrollment_doc', result.lastID, JSON.stringify({ type, enrollment_id: req.params.enrollmentId })]
+    );
+
+    res.status(201).json({
+      id: result.lastID,
+      enrollment_id: req.params.enrollmentId,
+      type,
+      file_path: filePath,
+      file_url: `/static/registrations/${req.params.enrollmentId}/${req.file.filename}`,
+      uploaded_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error uploading document.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/enrollment_docs/by-enrollment/:enrollmentId`, authenticateToken, async (req, res) => {
+  try {
+    const docs = await dbAll(
+      `SELECT id, enrollment_id, type, file_path, file_size, file_type, validation_status, validation_comments, validated_at, uploaded_at, updated_at,
+              file_path as file_url
+       FROM enrollment_docs
+       WHERE enrollment_id = ?`,
+      [req.params.enrollmentId]
+    );
+    res.json(docs.map(doc => ({
+      ...doc,
+      file_url: `/static/registrations/${req.params.enrollmentId}/${path.basename(doc.file_path)}`,
+    })));
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching documents.', error: error.message });
+  }
+});
+
+// Stats Routes
+app.get(`${API_PREFIX}/stats/enrollments-by-month`, authenticateToken, async (req, res) => {
+  try {
+    const data = await dbAll(
+      `SELECT strftime('%Y-%m', enrolled_at) as name, COUNT(*) as total
+       FROM enrollments
+       GROUP BY strftime('%Y-%m', enrolled_at)
+       ORDER BY name`
+    );
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching enrollment stats.', error: error.message });
+  }
+});
+
+app.get(`${API_PREFIX}/admin/dashboard/stats`, authenticateToken, async (req, res) => {
+  try {
+    const [registrations, examsScheduled, examsCorrected, pendingReviews] = await Promise.all([
+      dbGet('SELECT COUNT(*) as count FROM enrollments'),
+      dbGet('SELECT COUNT(*) as count FROM exams WHERE exam_date >= datetime("now")'),
+      dbGet('SELECT COUNT(*) as count FROM grades'),
+      dbGet('SELECT COUNT(*) as count FROM enrollment_docs WHERE validation_status = "pending"'),
+    ]);
+
+    res.json({
+      registrations: registrations.count,
+      exams_scheduled: examsScheduled.count,
+      exams_corrected: examsCorrected.count,
+      pending_reviews: pendingReviews.count,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching dashboard stats.', error: error.message });
+  }
+});
+
+// Student Answers Routes
+app.post(`${API_PREFIX}/student_answers/submit_bulk`, authenticateToken, async (req, res) => {
+  try {
+    const { answers } = req.body;
+    if (!Array.isArray(answers) || answers.length === 0) {
+      return res.status(400).json({ message: 'Answers array is required.' });
+    }
+
+    for (const answer of answers) {
+      const { enrollment_id, exam_id, question_id, answer: studentAnswer } = answer;
+
+      const enrollment = await dbGet('SELECT id FROM enrollments WHERE id = ?', [enrollment_id]);
+      if (!enrollment) {
+        return res.status(404).json({ message: `Enrollment ${enrollment_id} not found.` });
+      }
+
+      const question = await dbGet('SELECT id, correct_answer, score FROM questions WHERE id = ?', [question_id]);
+      if (!question) {
+        return res.status(404).json({ message: `Question ${question_id} not found.` });
+      }
+
+      const isCorrect = studentAnswer === question.correct_answer;
+      const scoreAwarded = isCorrect ? question.score : 0;
+
+      await dbRun(
+        `INSERT OR REPLACE INTO student_answers (enrollment_id, exam_id, question_id, answer, is_correct, score_awarded)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [enrollment_id, exam_id, question_id, JSON.stringify(studentAnswer), isCorrect, scoreAwarded]
+      );
+
+      await dbRun(
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details)
+         VALUES (?, ?, ?, ?, ?)`,
+        [req.user.id, 'submit_answer', 'student_answer', question_id, JSON.stringify({ enrollment_id, exam_id })]
+      );
+    }
+
+    res.json({ message: 'Answers submitted successfully.' });
+  } catch (error) {
+    res.status(500).json({ message: 'Error submitting answers.', error: error.message });
+  }
+});
+
+// Serve Static Files
+app.use('/static', express.static(path.join(__dirname, 'static')));
+
+// Error Handling Middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  if (err.message === 'Apenas JPEG, PNG ou PDF são permitidos.') {
+    return res.status(400).json({ message: err.message });
+  }
+  res.status(500).json({ message: 'Something went wrong!', error: err.message });
+});
+
+// Start Server
+(async () => {
+  try {
+    await setupAndSeedDatabase();
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  } catch (error) {
+    console.error('Failed to start server:', error.message);
+    process.exit(1);
+  }
+})();
+
+process.on('SIGINT', async () => {
+  console.log('Shutting down server...');
+  await closeDb();
+  process.exit(0);
+});

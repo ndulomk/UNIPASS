@@ -42,7 +42,7 @@ export default function ExamResultsPage() {
     
     const handleAutoGrade = async () => {
         setIsGrading(true);
-        toast.info("Auto-grading process started...");
+        toast.message       ("Auto-grading process started...");
         try {
             const response = await api.post(`/exams/${examId}/grade-auto`);
             toast.success(response.data.message);
