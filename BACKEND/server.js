@@ -2486,24 +2486,121 @@ app.get(`${API_PREFIX}/grades/admin/all-details`, async (req, res) => {
     res.status(500).json({ message: 'Error fetching all grades.', error: error.message });
   }
 });
+
+// async function gradeExamForEnrollment(examId, enrollmentId) {
+//   console.log(`Iniciando correção automática para Prova ID: ${examId}, Matrícula ID: ${enrollmentId}`);
+//   try {
+//     await dbRun('BEGIN TRANSACTION');
+
+//     // 1. Obter detalhes da matrícula, incluindo o período académico
+//     const enrollment = await dbGet('SELECT id, academic_period_id FROM enrollments WHERE id = ?', [enrollmentId]);
+//     if (!enrollment) {
+//       throw new Error(`Matrícula ${enrollmentId} não encontrada.`);
+//     }
+
+//     // 2. Obter as questões corrigíveis automaticamente (ex: verdadeiro/falso) e a sua pontuação total
+//     const questions = await dbAll(
+//       'SELECT id, correct_answer, score FROM questions WHERE exam_id = ? AND type = "true_false"',
+//       [examId]
+//     );
+
+//     // Se não houver questões de V/F, não há nada a corrigir automaticamente
+//     if (questions.length === 0) {
+//       console.log(`Prova ${examId} não tem questões de correção automática.`);
+//       await dbRun('ROLLBACK');
+//       return;
+//     }
+
+//     const maxScorePossible = questions.reduce((sum, q) => sum + q.score, 0);
+
+//     // 3. Obter as respostas do aluno para esta prova
+//     const studentAnswers = await dbAll(
+//       'SELECT question_id, answer FROM student_answers WHERE exam_id = ? AND enrollment_id = ?',
+//       [examId, enrollmentId]
+//     );
+
+//     // 4. Calcular a pontuação
+//     let totalScoreObtainedRaw = 0;
+//     for (const sAnswer of studentAnswers) {
+//       const question = questions.find(q => q.id === sAnswer.question_id);
+//       if (question) {
+//         const isCorrect = sAnswer.answer === question.correct_answer;
+//         const scoreAwarded = isCorrect ? question.score : 0;
+//         totalScoreObtainedRaw += scoreAwarded;
+
+//         // Atualiza a resposta do aluno com o status da correção
+//         await dbRun(
+//           `UPDATE student_answers SET is_correct = ?, score_awarded = ?
+//            WHERE enrollment_id = ? AND exam_id = ? AND question_id = ?`,
+//           [isCorrect, scoreAwarded, enrollmentId, examId, sAnswer.question_id]
+//         );
+//       }
+//     }
+
+//     // 5. Converter a pontuação para a escala de 0-20
+//     const finalScore = maxScorePossible > 0 ? (totalScoreObtainedRaw / maxScorePossible) * 20 : 0;
+//     const roundedScore = Math.round(finalScore * 100) / 100; // Arredonda para 2 casas decimais
+//     const gradeStatus = roundedScore >= 9.5 ? 'Aprovado' : 'Reprovado'; // Critério de aprovação
+
+//     // 6. Determinar o evaluation_type
+//     // Como exams.type ('objective', 'discursive', 'mixed') não corresponde a grades.evaluation_type,
+//     // usamos um valor padrão ou mapeamos de outra forma. Aqui, usamos 'continuous' como padrão.
+//     const evaluationType = 'continuous'; // Alternativa: consultar outra tabela ou lógica de negócio
+
+//     // 7. Verificar se a nota já existe na tabela 'grades'
+//     const existingGrade = await dbGet(
+//       'SELECT id FROM grades WHERE enrollment_id = ? AND exam_id = ?',
+//       [enrollmentId, examId]
+//     );
+
+//     if (existingGrade) {
+//       // Atualizar a nota existente
+//       await dbRun(
+//         `UPDATE grades SET
+//            score = ?,
+//            max_score = ?,
+//            evaluation_type = ?,
+//            updated_at = CURRENT_TIMESTAMP
+//          WHERE enrollment_id = ? AND exam_id = ?`,
+//         [roundedScore, 20, evaluationType, enrollmentId, examId]
+//       );
+//     } else {
+//       // Inserir uma nova nota
+//       await dbRun(
+//         `INSERT INTO grades (enrollment_id, exam_id, academic_period_id, score, max_score, evaluation_type)
+//          VALUES (?, ?, ?, ?, ?, ?)`,
+//         [enrollmentId, examId, enrollment.academic_period_id, roundedScore, 20, evaluationType]
+//       );
+//     }
+
+//     await dbRun('COMMIT');
+//     console.log(`Correção para Prova ID: ${examId}, Matrícula ID: ${enrollmentId} concluída. Nota: ${roundedScore}`);
+//   } catch (error) {
+//     await dbRun('ROLLBACK');
+//     console.error(`Erro ao corrigir prova ${examId} para matrícula ${enrollmentId}:`, error);
+//     throw error; // Re-throw para permitir captura no chamador
+//   }
+// }
+
+// 
+
 async function gradeExamForEnrollment(examId, enrollmentId) {
   console.log(`Iniciando correção automática para Prova ID: ${examId}, Matrícula ID: ${enrollmentId}`);
   try {
     await dbRun('BEGIN TRANSACTION');
 
-    // 1. Obter detalhes da matrícula, incluindo o período académico
+    // 1. Obter detalhes da matrícula, incluindo o período acadêmico
     const enrollment = await dbGet('SELECT id, academic_period_id FROM enrollments WHERE id = ?', [enrollmentId]);
     if (!enrollment) {
       throw new Error(`Matrícula ${enrollmentId} não encontrada.`);
     }
 
-    // 2. Obter as questões corrigíveis automaticamente (ex: verdadeiro/falso) e a sua pontuação total
+    // 2. Obter as questões corrigíveis automaticamente (verdadeiro/falso e múltipla escolha)
     const questions = await dbAll(
-      'SELECT id, correct_answer, score FROM questions WHERE exam_id = ? AND type = "true_false"',
+      'SELECT id, correct_answer, score, type, options FROM questions WHERE exam_id = ? AND type IN ("true_false", "multiple_choice")',
       [examId]
     );
 
-    // Se não houver questões de V/F, não há nada a corrigir automaticamente
     if (questions.length === 0) {
       console.log(`Prova ${examId} não tem questões de correção automática.`);
       await dbRun('ROLLBACK');
@@ -2521,9 +2618,34 @@ async function gradeExamForEnrollment(examId, enrollmentId) {
     // 4. Calcular a pontuação
     let totalScoreObtainedRaw = 0;
     for (const sAnswer of studentAnswers) {
-      const question = questions.find(q => q.id === sAnswer.question_id);
+      const question = questions.find((q) => q.id === sAnswer.question_id);
       if (question) {
-        const isCorrect = sAnswer.answer === question.correct_answer;
+        let isCorrect = false;
+
+        // Validate JSON data
+        if (!question.correct_answer || !sAnswer.answer) {
+          console.warn(`Dados inválidos: correct_answer=${question.correct_answer}, student_answer=${sAnswer.answer} para question_id=${sAnswer.question_id}`);
+          continue; // Skip invalid answers
+        }
+
+        let correctAnswers, studentAnswer;
+        try {
+          correctAnswers = JSON.parse(question.correct_answer);
+          studentAnswer = JSON.parse(sAnswer.answer);
+        } catch (parseError) {
+          console.error(`Erro ao parsear JSON para question_id=${sAnswer.question_id}:`, parseError);
+          continue; // Skip invalid JSON
+        }
+
+        if (question.type === 'true_false') {
+          isCorrect = studentAnswer.length === 1 && studentAnswer[0] === correctAnswers[0];
+        } else if (question.type === 'multiple_choice') {
+          isCorrect =
+            studentAnswer.length === correctAnswers.length &&
+            studentAnswer.every((ans) => correctAnswers.includes(ans)) &&
+            correctAnswers.every((ans) => studentAnswer.includes(ans));
+        }
+
         const scoreAwarded = isCorrect ? question.score : 0;
         totalScoreObtainedRaw += scoreAwarded;
 
@@ -2539,12 +2661,10 @@ async function gradeExamForEnrollment(examId, enrollmentId) {
     // 5. Converter a pontuação para a escala de 0-20
     const finalScore = maxScorePossible > 0 ? (totalScoreObtainedRaw / maxScorePossible) * 20 : 0;
     const roundedScore = Math.round(finalScore * 100) / 100; // Arredonda para 2 casas decimais
-    const gradeStatus = roundedScore >= 9.5 ? 'Aprovado' : 'Reprovado'; // Critério de aprovação
+    const gradeStatus = roundedScore >= 9.5 ? 'Aprovado' : 'Reprovado';
 
     // 6. Determinar o evaluation_type
-    // Como exams.type ('objective', 'discursive', 'mixed') não corresponde a grades.evaluation_type,
-    // usamos um valor padrão ou mapeamos de outra forma. Aqui, usamos 'continuous' como padrão.
-    const evaluationType = 'continuous'; // Alternativa: consultar outra tabela ou lógica de negócio
+    const evaluationType = 'continuous';
 
     // 7. Verificar se a nota já existe na tabela 'grades'
     const existingGrade = await dbGet(
@@ -2577,24 +2697,32 @@ async function gradeExamForEnrollment(examId, enrollmentId) {
   } catch (error) {
     await dbRun('ROLLBACK');
     console.error(`Erro ao corrigir prova ${examId} para matrícula ${enrollmentId}:`, error);
-    throw error; // Re-throw para permitir captura no chamador
+    throw error;
   }
 }
+// 
+
+
 
 
 // POST /api/v1/student_answers/submit_bulk
 const studentAnswersRouter = express.Router();
 
 studentAnswersRouter.post('/submit_bulk', async (req, res) => {
-  const { enrollment_id, exam_id, answers } = req.body; // Expect root-level keys
+  const { enrollment_id, exam_id, answers } = req.body;
   console.log('Received payload:', req.body);
 
   try {
+    // Validate payload
+    if (!enrollment_id || !exam_id || !Array.isArray(answers)) {
+      return res.status(400).json({ message: 'Payload inválido: enrollment_id, exam_id e answers são obrigatórios.' });
+    }
+
     await dbRun('BEGIN TRANSACTION');
 
     const enrollment = await dbGet('SELECT id, user_id FROM enrollments WHERE id = ?', [enrollment_id]);
     if (!enrollment) {
-      await dbRun('ROLLBACK');
+       await dbRun('ROLLBACK');
       return res.status(404).json({ message: 'Matrícula não encontrada.' });
     }
 
@@ -2606,12 +2734,28 @@ studentAnswersRouter.post('/submit_bulk', async (req, res) => {
 
     // Insere/Atualiza as respostas do aluno
     for (const answer of answers) {
+      if (!answer.question_id || !answer.answer) {
+        console.warn(`Resposta inválida para question_id=${answer.question_id}`);
+        continue;
+      }
+
+      // Ensure answer is a valid JSON string
+      let answerJson;
+      try {
+        // If answer is already a string, validate it; otherwise, stringify it
+        answerJson = typeof answer.answer === 'string' ? answer.answer : JSON.stringify(answer.answer);
+        JSON.parse(answerJson); // Validate JSON
+      } catch (e) {
+        console.warn(`Formato de resposta inválido para question_id=${answer.question_id}:`, e);
+        answerJson = JSON.stringify(['Não respondida']); // Fallback to valid JSON
+      }
+
       await dbRun(
         `INSERT INTO student_answers (enrollment_id, exam_id, question_id, answer)
          VALUES (?, ?, ?, ?)
          ON CONFLICT (enrollment_id, exam_id, question_id) DO UPDATE SET
            answer = excluded.answer, updated_at = CURRENT_TIMESTAMP`,
-        [enrollment_id, exam_id, answer.question_id, answer.answer]
+        [enrollment_id, exam_id, answer.question_id, answerJson]
       );
     }
 
@@ -2620,7 +2764,6 @@ studentAnswersRouter.post('/submit_bulk', async (req, res) => {
     // Chama a função de correção em background
     gradeExamForEnrollment(exam_id, enrollment_id);
 
-    // Responde imediatamente ao utilizador com sucesso
     res.json({ message: 'Respostas submetidas com sucesso. A sua nota será processada.' });
   } catch (error) {
     await dbRun('ROLLBACK');
