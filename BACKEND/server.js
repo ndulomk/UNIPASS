@@ -204,17 +204,17 @@ async function initializeDb() {
                 FOREIGN KEY (enrollment_id) REFERENCES enrollments(id) ON DELETE CASCADE
             )`,
 
-            // 8. Matrizes de conteúdo
+        // 7. Matrizes de conteúdo
             `CREATE TABLE IF NOT EXISTS content_matrices (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                discipline_id INTEGER NOT NULL,
+                course_id INTEGER NOT NULL,
                 theme TEXT NOT NULL,
                 competencies TEXT NOT NULL,
                 skills TEXT NOT NULL,
-                syllabus TEXT NOT NULL,
+                syllabus TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                FOREIGN KEY (discipline_id) REFERENCES disciplines(id) ON DELETE CASCADE
+                FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
             )`,
 
             // 9. Exames
@@ -312,7 +312,6 @@ async function initializeDb() {
             'CREATE INDEX IF NOT EXISTS idx_student_answers_exam_id ON student_answers(exam_id)',
             'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)',
             'CREATE INDEX IF NOT EXISTS idx_payments_enrollment_id ON payments(enrollment_id)',
-            'CREATE INDEX IF NOT EXISTS idx_content_matrices_discipline_id ON content_matrices(discipline_id)'
         ];
 
         for (const indexQuery of indexes) {
@@ -348,6 +347,59 @@ async function initializeDb() {
 //   console.log(err)
   
 // })
+async function populateContentMatrices() {
+    const matrices = [
+        {
+            course_id: 1, // Engenharia Informática
+            theme: 'Fundamentos de Programação',
+            competencies: ['Compreender conceitos básicos de algoritmos', 'Desenvolver soluções em Python'],
+            skills: ['Escrever código limpo', 'Depurar programas'],
+            syllabus: 'Introdução à programação, estruturas de controle, funções, estruturas de dados básicas.'
+        },
+        {
+            course_id: 1, // Engenharia Informática
+            theme: 'Bancos de Dados',
+            competencies: ['Modelar bancos de dados relacionais', 'Escrever consultas SQL'],
+            skills: ['Criar esquemas de banco', 'Optimizar consultas'],
+            syllabus: 'Modelagem de dados, SQL, normalização, índices.'
+        },
+        {
+            course_id: 2, // Medicina
+            theme: 'Anatomia Humana',
+            competencies: ['Identificar estruturas anatômicas', 'Correlacionar anatomia com função'],
+            skills: ['Analisar imagens médicas', 'Descrever sistemas do corpo'],
+            syllabus: 'Sistemas esquelético, muscular, nervoso, cardiovascular.'
+        },
+        {
+            course_id: 3, // Direito
+            theme: 'Direito Civil',
+            competencies: ['Analisar contratos', 'Interpretar legislação civil'],
+            skills: ['Redigir peças jurídicas', 'Mediar conflitos'],
+            syllabus: 'Teoria geral do direito civil, obrigações, contratos.'
+        },
+        {
+            course_id: 4, // Psicologia
+            theme: 'Psicologia Comportamental',
+            competencies: ['Compreender teorias do comportamento', 'Aplicar técnicas de intervenção'],
+            skills: ['Observar comportamentos', 'Planejar intervenções'],
+            syllabus: 'Condicionamento clássico, operante, terapias comportamentais.'
+        }
+    ];
+
+    for (const matrix of matrices) {
+        await dbRun(
+            `INSERT OR IGNORE INTO content_matrices (course_id, theme, competencies, skills, syllabus) 
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+                matrix.course_id,
+                matrix.theme,
+                JSON.stringify(matrix.competencies),
+                JSON.stringify(matrix.skills),
+                matrix.syllabus
+            ]
+        );
+    }
+}
 
 async function insertInitialData() {
     try {
@@ -359,7 +411,7 @@ async function insertInitialData() {
                 'admin@test.com',
                 'António',
                 'dos Santos',
-                await bcrypt.hash('admin123', 10), // Hash dinâmico
+                await bcrypt.hash('admin123', 10),
                 'admin',
                 'active'
             ]
@@ -387,21 +439,8 @@ async function insertInitialData() {
             );
         }
 
-        // Insere disciplinas
-        const disciplines = [
-            { course_id: 1, academic_period_id: 1, name: 'Programação I', code: 'INF001', credits: 4 },
-            { course_id: 1, academic_period_id: 1, name: 'Base de Dados', code: 'INF002', credits: 4 },
-            { course_id: 2, academic_period_id: 1, name: 'Anatomia Humana', code: 'MED001', credits: 6 },
-            { course_id: 3, academic_period_id: 1, name: 'Direito Civil', code: 'DIR001', credits: 5 }
-        ];
-
-        for (const disc of disciplines) {
-            await dbRun(
-                `INSERT OR IGNORE INTO disciplines (course_id, academic_period_id, name, code, credits) 
-                 VALUES (?, ?, ?, ?, ?)`,
-                [disc.course_id, disc.academic_period_id, disc.name, disc.code, disc.credits]
-            );
-        }
+        // Popula matrizes de conteúdo
+        await populateContentMatrices();
 
         console.log('Dados iniciais inseridos com sucesso.');
     } catch (error) {
@@ -463,79 +502,6 @@ async function populateMoreMockData(numUsers = 10, numEnrollments = 20, numExams
             );
         }
 
-        // Cria matrizes de conteúdo
-        const disciplines = await dbAll('SELECT id, course_id FROM disciplines');
-        for (const discipline of disciplines) {
-            await dbRun(
-                `INSERT OR IGNORE INTO content_matrices (discipline_id, theme, competencies, skills, syllabus)
-                 VALUES (?, ?, ?, ?, ?)`,
-                [
-                    discipline.id,
-                    `Tema ${discipline.id}`,
-                    'Competências básicas',
-                    'Habilidades práticas',
-                    'Conteúdo programático'
-                ]
-            );
-        }
-
-        // Cria exames
-        const contentMatrices = await dbAll('SELECT id, discipline_id FROM content_matrices');
-        for (let i = 0; i < numExams; i++) {
-            const discipline = disciplines[i % disciplines.length];
-            const contentMatrix = contentMatrices.find(cm => cm.discipline_id === discipline.id);
-            const examDate = new Date();
-            examDate.setDate(examDate.getDate() + (Math.floor(Math.random() * 60) - 30));
-
-            const result = await dbRun(
-                `INSERT OR IGNORE INTO exams (name, exam_date, duration_minutes, type, max_score, course_id, content_matrix_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    `Exame ${i + 1}`,
-                    examDate.toISOString(),
-                    [60, 90, 120][Math.floor(Math.random() * 3)],
-                    ['objective', 'discursive', 'mixed'][Math.floor(Math.random() * 3)],
-                    100,
-                    discipline.course_id,
-                    contentMatrix ? contentMatrix.id : null
-                ]
-            );
-
-            // Cria questões
-            if (result.lastID) {
-                const numQuestions = Math.floor(Math.random() * 5) + 3;
-                for (let j = 0; j < numQuestions; j++) {
-                    await dbRun(
-                        `INSERT OR IGNORE INTO questions (exam_id, text, type, options, correct_answer, score)
-                         VALUES (?, ?, ?, ?, ?, ?)`,
-                        [
-                            result.lastID,
-                            `Questão ${j + 1}`,
-                            'multiple_choice',
-                            JSON.stringify(['A', 'B', 'C', 'D']),
-                            ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)],
-                            (Math.random() * 4 + 1).toFixed(1)
-                        ]
-                    );
-                }
-            }
-        }
-
-        // Cria notas
-        const allEnrollments = await dbAll('SELECT id FROM enrollments');
-        const allExams = await dbAll('SELECT id, exam_date FROM exams');
-        for (let i = 0; i < Math.min(allEnrollments.length, numExams); i++) {
-            const enrollment = allEnrollments[i % allEnrollments.length];
-            const exam = allExams[i % allExams.length];
-            const score = Math.random() * 20;
-            const evaluationType = ['midterm', 'final', 'makeup', 'continuous'][Math.floor(Math.random() * 4)];
-
-            await dbRun(
-                `INSERT OR IGNORE INTO grades (enrollment_id, academic_period_id, exam_id, score, max_score, evaluation_type)
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [enrollment.id, academicPeriod.id, exam.id, score.toFixed(1), 20, evaluationType]
-            );
-        }
 
         console.log(`População de dados mock concluída: ${numUsers} usuários, ${numEnrollments} matrículas, ${numExams} exames.`);
     } catch (error) {
@@ -1704,37 +1670,56 @@ app.use(`${API_PREFIX}/enrollments`, enrollmentsRouter);
 
 
 
-// --- Rotas de Matrizes de Conteúdo (Content Matrix) ---
 const contentMatrixRouter = express.Router();
-contentMatrixRouter.post('/',  async (req, res) => {
-    const { discipline_id, theme, competencies, skills, syllabus } = req.body;
-    if (!discipline_id || !theme) {
-        return res.status(400).json({ message: "discipline_id e theme são obrigatórios." });
+
+contentMatrixRouter.post('/', async (req, res) => {
+    const { course_id, theme, competencies, skills, syllabus } = req.body;
+    if (!course_id || !theme) {
+        return res.status(400).json({ message: 'course_id e theme são obrigatórios.' });
     }
     try {
         const result = await dbRun(
-            'INSERT INTO content_matrices (discipline_id, theme, competencies, skills, syllabus) VALUES (?, ?, ?, ?, ?)',
-            [discipline_id, theme, JSON.stringify(competencies || []), JSON.stringify(skills || []), syllabus || null]
+            'INSERT INTO content_matrices (course_id, theme, competencies, skills, syllabus) VALUES (?, ?, ?, ?, ?)',
+            [course_id, theme, JSON.stringify(competencies || []), JSON.stringify(skills || []), syllabus || null]
         );
-        const matrix = await dbGet('SELECT cm.*, d.name as discipline_name FROM content_matrices cm JOIN disciplines d ON cm.discipline_id = d.id WHERE cm.id = ?', [result.lastID]);
-        res.status(201).json({...matrix, competencies: JSON.parse(matrix.competencies), skills: JSON.parse(matrix.skills)});
-    } catch (e) {
-        if (e.message.includes('FOREIGN KEY constraint failed')) {
-            return res.status(400).json({ message: "Disciplina inválida." });
+        const matrix = await dbGet(
+            'SELECT cm.*, c.name AS course_name FROM content_matrices cm JOIN courses c ON c.id = ?cm.course_id WHERE cm.id = ?',
+            [result.lastID]
+        );
+        res.status(201).json({
+            ...matrix,
+            competencies: JSON.parse(matrix.competencies || '[]'),
+            skills: JSON.parse(matrix.skills || '[]')
+        });
+    } catch (error) {
+        if (error.message.includes('FOREIGN KEY constraint failed')) {
+            return res.status(400).json({ message: 'Curso inválido.' });
         }
-        res.status(500).json({ message: "Erro ao criar matriz de conteúdo.", error: e.message });
+        console.error('Erro ao criar matriz:', error);
+        res.status(500).json({ message: 'Erro ao criar matriz de conteúdo.', error: error.message });
     }
 });
-contentMatrixRouter.get('/by-discipline/:disciplineId', async (req, res) => {
+
+contentMatrixRouter.get('/by-course/:courseId', async (req, res) => {
     try {
         const matrices = await dbAll(
-            'SELECT cm.*, d.name as discipline_name FROM content_matrices cm JOIN disciplines d ON cm.discipline_id = d.id WHERE cm.discipline_id = ?',
-            [req.params.disciplineId]
+            'SELECT cm.*, c.name AS course_name FROM content_matrices cm JOIN courses c ON cm.course_id = c.id WHERE cm.course_id = ?',
+            [req.params.courseId]
         );
-        res.json(matrices.map(m => ({...m, competencies: JSON.parse(m.competencies), skills: JSON.parse(m.skills)})));
-    } catch (e) { res.status(500).json({ message: "Erro ao listar matrizes da disciplina.", error: e.message }); }
+        res.json(
+            matrices.map((m) => ({
+                ...m,
+                competencies: JSON.parse(m.competencies || '[]'),
+                skills: JSON.parse(m.skills || '[]')
+            }))
+        );
+    } catch (error) {
+        console.error('Erro ao listar matrizes:', error);
+        res.status(500).json({ message: 'Erro ao listar matrizes do curso.', error: error.message });
+    }
 });
-app.use(`${API_PREFIX}/content-matrices`, contentMatrixRouter); // Note o prefixo diferente do FastAPI para simplificar
+
+app.use(`${API_PREFIX}/content-matrices`, contentMatrixRouter);
 
 // --- Rotas de Documentos (Enrollment Documents) ---
 // --- Rotas de Documentos (Enrollment Documents) ---
@@ -2637,7 +2622,10 @@ async function gradeExamForEnrollment(examId, enrollmentId) {
           continue; // Skip invalid JSON
         }
 
-        if (question.type === 'true_false') {
+        // Handle 'Não respondida' explicitly
+        if (studentAnswer.length === 1 && studentAnswer[0] === 'Não respondida') {
+          isCorrect = false; // Explicitly mark as incorrect
+        } else if (question.type === 'true_false') {
           isCorrect = studentAnswer.length === 1 && studentAnswer[0] === correctAnswers[0];
         } else if (question.type === 'multiple_choice') {
           isCorrect =
@@ -2709,7 +2697,7 @@ async function gradeExamForEnrollment(examId, enrollmentId) {
 const studentAnswersRouter = express.Router();
 
 studentAnswersRouter.post('/submit_bulk', async (req, res) => {
-  const { enrollment_id, exam_id, answers } = req.body;
+  const { enrollment_id, exam_id, answers, submission_type } = req.body;
   console.log('Received payload:', req.body);
 
   try {
@@ -2722,7 +2710,7 @@ studentAnswersRouter.post('/submit_bulk', async (req, res) => {
 
     const enrollment = await dbGet('SELECT id, user_id FROM enrollments WHERE id = ?', [enrollment_id]);
     if (!enrollment) {
-       await dbRun('ROLLBACK');
+      await dbRun('ROLLBACK');
       return res.status(404).json({ message: 'Matrícula não encontrada.' });
     }
 
@@ -2730,6 +2718,13 @@ studentAnswersRouter.post('/submit_bulk', async (req, res) => {
     if (!exam) {
       await dbRun('ROLLBACK');
       return res.status(404).json({ message: 'Prova não encontrada.' });
+    }
+
+    // Skip if answers is empty
+    if (answers.length === 0) {
+      console.warn(`Nenhuma resposta fornecida para exam_id=${exam_id}, enrollment_id=${enrollment_id}`);
+      await dbRun('COMMIT');
+      return res.status(200).json({ message: 'Nenhuma resposta submetida. A sua nota será processada.' });
     }
 
     // Insere/Atualiza as respostas do aluno
@@ -2742,7 +2737,6 @@ studentAnswersRouter.post('/submit_bulk', async (req, res) => {
       // Ensure answer is a valid JSON string
       let answerJson;
       try {
-        // If answer is already a string, validate it; otherwise, stringify it
         answerJson = typeof answer.answer === 'string' ? answer.answer : JSON.stringify(answer.answer);
         JSON.parse(answerJson); // Validate JSON
       } catch (e) {
@@ -2761,12 +2755,20 @@ studentAnswersRouter.post('/submit_bulk', async (req, res) => {
 
     await dbRun('COMMIT');
 
-    // Chama a função de correção em background
-    gradeExamForEnrollment(exam_id, enrollment_id);
+    // Chama a função de correção em background asynchronously
+    setImmediate(() => {
+      gradeExamForEnrollment(exam_id, enrollment_id).catch((err) => {
+        console.error(`Erro ao corrigir prova ${exam_id} para matrícula ${enrollment_id} em background:`, err);
+      });
+    });
 
     res.json({ message: 'Respostas submetidas com sucesso. A sua nota será processada.' });
   } catch (error) {
-    await dbRun('ROLLBACK');
+    try {
+      await dbRun('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('Erro ao executar ROLLBACK:', rollbackError);
+    }
     console.error('Erro ao submeter respostas:', error);
     res.status(500).json({ message: 'Erro ao submeter respostas.', error: error.message });
   }
@@ -3199,12 +3201,21 @@ app.use((err, req, res, next) => {
 });
 
 // --- Inicialização do Servidor ---
-app.listen(PORT, () => {
-  console.log(`Servidor a correr na porta ${PORT}`);
-  console.log(`API Prefix: ${API_PREFIX}`);
-  console.log(`Database: ${dbPath}`);
-});
+async function startServer() {
+    try {
+        await setupAndSeedDatabase(); // Inicializa e popula o banco
+        app.listen(PORT, () => {
+            console.log(`Servidor a correr na porta ${PORT}`);
+            console.log(`API Prefix: ${API_PREFIX}`);
+            console.log(`Database: ${dbPath}`);
+        });
+    } catch (error) {
+        console.error('Erro ao iniciar o servidor:', error);
+        process.exit(1);
+    }
+}
 
+startServer();
 // --- Fechamento do Banco ---
 process.on('SIGINT', () => {
   db.close((err) => {
