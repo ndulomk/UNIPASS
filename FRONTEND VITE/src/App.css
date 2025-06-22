@@ -1,0 +1,80 @@
+@font-face {
+  font-family: quick;
+  src: url(../public/font/Quicksand-VariableFont_wght.ttf);
+}
+@font-face {
+  font-family: karla;
+  src: url(../public/font/Karla-VariableFont_wght.ttf);
+}
+@font-face {
+  font-family: poppins;
+  src: url(../public/font/Poppins-Regular.ttf);
+}
+@font-face {
+  font-family: popbold;
+  src: url(../public/font/Poppins-ExtraBold.ttf);
+}
+@font-face {
+  font-family: drip;
+  src: url(../public/font/ArchivoNarrow-VariableFont_wght.ttf);
+}
+*{
+  font-family: poppins;
+  outline: none;
+  padding: 0;
+  margin: 0;
+
+}
+
+body {
+  font-family: Arial, sans-serif;
+}
+
+.calendar {
+  text-align: center;
+  padding: 20px;
+}
+
+.calendar h1 {
+  margin-bottom: 20px;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+.month {
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  padding: 10px;
+  background-color: #f9f9f9;
+}
+
+.month h2 {
+  margin: 0;
+  font-size: 18px;
+  color: #333;
+}
+
+.days-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.day {
+  padding: 5px;
+  background-color: #eaeaea;
+  border-radius: 4px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.day:hover {
+  background-color: #4caf50;
+  color: white;
+  cursor: pointer;
+}

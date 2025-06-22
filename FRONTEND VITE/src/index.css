@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --border: 231 231 232;
+  --p: 90 91 95;
+  --text: 0 0 0;
+  --textbtn: 255 255 255;
+  --btn: 0 0 0;
+  --bgcard: 255 255 255;
+  --sidebar: 245 245 244;
+  --bordercard: 128, 128, 128, 0.267;
+  --background: 255, 255, 255;
+  --bgWhite: 134, 134, 134, 0.119;
+  --mycolor: 255 217 0;
+  --bordersearch: 128, 128, 128, 0.267;
+  --bgSearch: 129, 129, 130, 0.282;
+  --search: 255 255 255;
+}
+
+@font-face {
+  font-family: quick;
+  src: url(../public/font/Quicksand-VariableFont_wght.ttf);
+}
+* {
+  font-family: poppins;
+  outline: none;
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  font-family: Arial, sans-serif;
+  background-color: rgb(var(--background));
+  color: rgb(var(--text));
+}
